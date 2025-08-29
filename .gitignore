@@ -1,0 +1,7 @@
+*.egg-info/
+*__pycache__*
+scripts/*.yaml
+!scripts/*_template.yaml
+scripts/*/*.yaml
+!scripts/*/*_template.yaml
+*.hypothesis/
