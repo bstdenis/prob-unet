@@ -16,7 +16,7 @@ default_features = {"rivers": {"edgecolor": "black"},
                     "coastline": {"edgecolor": "black"}, }
 
 
-def geo_dataset_ax_plot(ax, geo_dataset_ax_data, ax_projection=None, original_data_projection=None,
+def geo_dataset_ax_plot(ax, geo_dataset_ax_data, ax_projection=None,
                         ax_lon_min=None, ax_lon_max=None, ax_lat_min=None, ax_lat_max=None, vmin=None, vmax=None,
                         cbar_padding=0.05, title=None):
     ax.yaxis.tick_right()
@@ -38,7 +38,7 @@ def geo_dataset_ax_plot(ax, geo_dataset_ax_data, ax_projection=None, original_da
     ax.set_ylim(ax_lat_min, ax_lat_max)
     ax.set_aspect('auto')
     fg.gridmap(ax=ax, data=geo_dataset_ax_data.gridmap_data, projection=ax_projection,
-               transform=original_data_projection, features=default_features, frame=True, show_time=False,
+               transform=geo_dataset_ax_data.data_projection, features=default_features, frame=True, show_time=False,
                plot_kw={'vmin': vmin, 'vmax': vmax, 'cbar_kwargs': {'fraction': 0.046, 'pad': cbar_padding}})
     if title is None:
         ax.set_title(f'{geo_dataset_ax_data.var_name} at time index {geo_dataset_ax_data.time_index}')
