@@ -73,15 +73,20 @@ class FeatureStack:
         else:
             self.stack = np.zeros((num_samples, num_dimensions))
         self.stack_length = 0
+        self.keys = []
         self.features_mean = None
         self.features_std = None
         self.hnsw_index = None
 
-    def add(self, features):
+    def add(self, features, key=None):
         if isinstance(self.stack, list):
             self.stack.append(features)
         else:
             self.stack[self.stack_length, :] = features
+        if key is None:
+            self.keys.append(self.stack_length)
+        else:
+            self.keys.append(key)
         self.stack_length += 1
 
     def normalize_features(self, features):
@@ -94,13 +99,13 @@ class FeatureStack:
     def normalize_stack(self):
         if isinstance(self.stack, list):
             raise NotImplementedError()
-        self.features_mean = self.stack.mean(axis=0, keepdims=True)
-        self.features_std = self.stack.std(axis=0, keepdims=True) + 1e-12
-        features_stack = (self.stack - self.features_mean) / self.features_std
+        self.features_mean = self.stack[:self.stack_length].mean(axis=0, keepdims=True)
+        self.features_std = self.stack[:self.stack_length].std(axis=0, keepdims=True) + 1e-12
+        features_stack = (self.stack[:self.stack_length] - self.features_mean) / self.features_std
         features_norm = np.linalg.norm(features_stack, axis=1, keepdims=True) + 1e-12
-        self.stack = features_stack / features_norm
+        self.stack[:self.stack_length] = features_stack / features_norm
 
     def build_hnsw(self):
         if isinstance(self.stack, list):
             raise NotImplementedError()
-        self.hnsw_index = build_hnsw(self.stack)
+        self.hnsw_index = build_hnsw(self.stack[:self.stack_length])
