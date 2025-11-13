@@ -84,7 +84,7 @@ def pr_daily_feature_extraction(path_climex, sim, year, month, day, i_min, i_max
     data = pr[(day - 1) * 24: day * 24, i_min:i_max, j_min:j_max].mean(0)
     feature_data = normalize(data, mode=(0, 1), valid_min=0, valid_max=1e-1, log_normalize=True, log_offset=1e-8)
     upscale_x, upscale_y = (feature_data.shape[0] // upscale_factor, feature_data.shape[1] // upscale_factor)
-    upscaled_data = feature_data.reshape(upscale_x, 4, upscale_y, 4).mean(axis=(1, 3))
+    upscaled_data = feature_data.reshape(upscale_x, upscale_factor, upscale_y, upscale_factor).mean(axis=(1, 3))
     features = custom_features(upscaled_data, mode=feature_mode)
     return features
 

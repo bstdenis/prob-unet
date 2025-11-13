@@ -46,8 +46,30 @@ rule compute_features:
         "climex_pattern_search.py"
 
 
-rule consolidate:
+rule build_feature_stack:
     input:
         get_feature_files
+    output:
+        "results/feature_stack.pkl"
+    script:
+        "climex_pattern_search_consolidate.py"
+
+
+def find_neighbors_input(wildcards):
+    return ["results/feature_stack.pkl"] + get_feature_files(wildcards)
+
+
+rule find_neighbors:
+    input:
+        find_neighbors_input
+    output:
+        "results/climex_neighbors.pkl"
+    script:
+        "climex_find_neighbors.py"
+
+
+rule last_step:
+    input:
+        "results/climex_neighbors.pkl"
     output:
         touch("results/task.done")
