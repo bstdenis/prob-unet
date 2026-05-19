@@ -2,6 +2,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import xarray
+
 from prob_unet.datasets import climex
 
 
@@ -36,3 +38,24 @@ def pattern_search_batches_to_json(config):
     for i, batch in enumerate(batches):
         with open(Path(config.path_workflow, "results", f"climex_batch_{i:08d}.json"), "w") as f:
             f.write(json.dumps(batch, indent=2))
+
+
+def save_climex_tile(ds_ref, output_file, variable_name, data, imin, imax, jmin, jmax):
+    ds_sub = ds_ref.isel(rlat=slice(imin, imax), rlon=slice(jmin, jmax))
+    coords = {
+        "height": ds_sub.height,
+        "lat": ds_sub.lat,
+        "lon": ds_sub.lon,
+        "rlat": ds_sub.rlat,
+        "rlon": ds_sub.rlon,
+        "time": ds_sub.time
+    }
+    kept_attributes = ["Conventions"]
+    new_attrs = {k: ds_ref.attrs[k] for k in kept_attributes if k in ds_ref.attrs}
+    new_ds = xarray.Dataset(
+        data_vars={variable_name: (ds_ref[variable_name].dims, data)},
+        coords=coords,
+        attrs=new_attrs
+    )
+    new_ds[variable_name].attrs = ds_ref[variable_name].attrs
+    new_ds.to_netcdf(output_file, engine="h5netcdf")
