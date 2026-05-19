@@ -21,8 +21,9 @@ from prob_unet.ml.probabilistic_unet import ProbabilisticUnet
 
 
 class SkeletonDataset(td.Dataset):
-    def __init__(self, path_data, path_neighbors, active_split_name="train"):
-        self.path_data = path_data
+    def __init__(self, path_daily_data, path_daily_coarse_data, path_neighbors, active_split_name="train"):
+        self.path_daily_data = path_daily_data
+        self.path_daily_coarse_data = path_daily_coarse_data
         self.path_neighbors = path_neighbors
         self.num_neighbors = 2
         self.active_split_name = active_split_name
@@ -34,7 +35,7 @@ class SkeletonDataset(td.Dataset):
             self.starting_idx = 20
         else:
             raise ValueError(f"Unsupported split name: {self.active_split_name}")
-        ds = xarray.open_dataset(Path(self.path_data, "kda_daily_pr_1961.nc"), engine="h5netcdf",
+        ds = xarray.open_dataset(Path(self.path_daily_data, "kda_daily_pr_1961.nc"), engine="h5netcdf",
                                  decode_times=False)
         self.save_data = {"rlat": ds["rlat"].values, "rlon": ds["rlon"].values, "lat": ds["lat"].values,
                           "lon": ds["lon"].values, "height": ds["height"].values,
@@ -64,7 +65,7 @@ class SkeletonDataset(td.Dataset):
         netcdf_idx = self.starting_idx + file_count
 
         ds_input = xarray.open_dataset(
-            Path(self.path_data, "kda_daily_pr_1961_coarse.nc"),
+            Path(self.path_daily_coarse_data, "kda_daily_pr_1961_coarse.nc"),
             engine="h5netcdf", decode_times=False)
         input_data = normalize(ds_input["pr"].values[netcdf_idx, :, :], valid_min=0.0, valid_max=0.001,
                                log_normalize=True, log_offset=1e-12)
@@ -73,14 +74,14 @@ class SkeletonDataset(td.Dataset):
 
         if neighbor_idx == 0:
             ds_output = xarray.open_dataset(
-                Path(self.path_data, "kda_daily_pr_1961.nc"),
+                Path(self.path_daily_data, "kda_daily_pr_1961.nc"),
                 engine="h5netcdf", decode_times=False)
             target_data = ds_output["pr"].values[netcdf_idx, :, :]
         else:
             neighbors_list = self.neighbors[("kda", cf_datetime.year, cf_datetime.month, cf_datetime.day)]
             neighbor = neighbors_list[neighbor_idx - 1]
             ds_output = xarray.open_dataset(
-                Path(self.path_data, f"{neighbor[0]}_daily_pr_{neighbor[1]}.nc"),
+                Path(self.path_daily_data, f"{neighbor[0]}_daily_pr_{neighbor[1]}.nc"),
                 engine="h5netcdf", decode_times=False)
             cf_datetime_output = cftime.num2date(
                 ds_output["time"].values[:], ds_output["time"].attrs["units"],
@@ -116,16 +117,19 @@ def test_climex_walking_skeleton():
     # ToDo: write into a single function call
     for member in config.members:
         for year in range(config.starting_training_year, config.ending_training_year + 1):
-            path_coarse_input = Path(config.path_output, f"{member}_daily_{config.variable_name}_{year}_coarse.nc")
+            path_coarse_input = Path(config.path_daily_coarse_output,
+                                     f"{member}_daily_{config.variable_name}_{year}_coarse.nc")
             if not path_coarse_input.is_file():
-                ds_coarse = climex_for_prob_unet.climex_upscale(config.path_output, member, year)
+                ds_coarse = climex_for_prob_unet.climex_upscale(config.path_daily_output, member, year)
                 ds_coarse.to_netcdf(path_coarse_input, engine="h5netcdf",
                                     encoding={"pr": {"chunksizes": (365, 32, 32)}})
     
     # Step 2: Need a dataloader that can read this file and feed it into a UNet for training.
     # ToDo: there may need to be some smarter shuffling
     #       (e.g. load a number of different netcdf files and shuffle in this subset, there's a name for that...)
-    skeleton_dataset = SkeletonDataset(path_data=config.path_output, path_neighbors=config.path_neighbors,
+    skeleton_dataset = SkeletonDataset(path_daily_data=config.path_daily_output,
+                                       path_daily_coarse_data=config.path_daily_coarse_output,
+                                       path_neighbors=config.path_neighbors,
                                        active_split_name="train")
     data_loader = td.DataLoader(skeleton_dataset, batch_size=4, shuffle=True)
 
@@ -164,7 +168,9 @@ def test_climex_walking_skeleton():
     # Step 4: Output some inference with latent space control
     # Using train set for dummy inference, but should be test set after validation
     data_loader_test = td.DataLoader(
-        SkeletonDataset(path_data=config.path_output, path_neighbors=config.path_neighbors, active_split_name="train"),
+        SkeletonDataset(path_daily_data=config.path_daily_output,
+                        path_daily_coarse_data=config.path_daily_coarse_output,
+                        path_neighbors=config.path_neighbors, active_split_name="train"),
         batch_size=4, shuffle=False)
     for item in data_loader_test:
         for n, latent_space_coords in enumerate(itertools.product(*config.latent_space_discretization)):

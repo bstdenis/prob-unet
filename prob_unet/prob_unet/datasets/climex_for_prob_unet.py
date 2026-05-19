@@ -6,12 +6,14 @@ import cftime
 import numpy as np
 import xarray
 
+from resoterre.config_utils import config_from_yaml
 from resoterre.data_management.netcdf_utils import CFVariables, netcdf_defaults
 
 
 @dataclass(frozen=True, slots=True)
 class ProbUnetClimexConfig:
-    path_output: Path
+    path_daily_output: Path
+    path_daily_coarse_output: Path
     path_climex: Path
     path_neighbors: Path
     variable_name: str
@@ -20,6 +22,13 @@ class ProbUnetClimexConfig:
     members: list = field(default_factory=list)
     overwrite_existing_daily_files: bool = False
     latent_space_discretization: list = field(default_factory=list)
+
+
+def prob_unet_climex_parse_config(config: ProbUnetClimexConfig | Path | str) -> ProbUnetClimexConfig:
+    if isinstance(config, ProbUnetClimexConfig):
+        return config
+    else:
+        return config_from_yaml(ProbUnetClimexConfig, config)
 
 
 def climex_hourly_to_daily_single_year(path_climex, member, year):
@@ -267,9 +276,10 @@ def save_result_from_dataset_item(path_output, dataset, item, result, prefix="in
 
 
 def climex_hourly_to_daily_single_year_to_disk(config, member, year):
+    config = prob_unet_climex_parse_config(config)
     if config.variable_name != "pr":
         raise NotImplementedError("This function is currently only verified for 'pr' variable.")
-    path_sample_input = Path(config.path_output, f"{member}_daily_{config.variable_name}_{year}.nc")
+    path_sample_input = Path(config.path_daily_output, f"{member}_daily_{config.variable_name}_{year}.nc")
     if not path_sample_input.is_file() or config.overwrite_existing_daily_files:
         ds_daily = climex_hourly_to_daily_single_year(config.path_climex, member, year)
         path_sample_input.parent.mkdir(parents=True, exist_ok=True)
