@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import xarray
+from torchmetrics.image import StructuralSimilarityIndexMeasure, MultiScaleStructuralSimilarityIndexMeasure
 from torch.utils import data as td
 
 
@@ -157,6 +158,26 @@ class SkeletonDataset(td.Dataset):
         return idx_data
 
 
+def output_training_figures(config, count, input_data, target_data, output_data):
+    if count in [0, 1, 2, 5, 10, 50, 100, 1000]:
+        n_rows = input_data.shape[0]
+        n_cols = 3
+        fig = plt.figure(figsize=(12, 4 * n_rows))
+        for i in range(n_rows):
+            ax1 = fig.add_subplot(n_rows, n_cols, i * n_cols + 1)
+            ax1.set_title("Input")
+            ax1.pcolormesh(input_data[i, 0, :, :].cpu().detach().numpy(), vmin=-1, vmax=1)
+            ax2 = fig.add_subplot(n_rows, n_cols, i * n_cols + 2)
+            ax2.set_title("Target")
+            ax2.pcolormesh(target_data[i, 0, :, :].cpu().detach().numpy(), vmin=-1, vmax=1)
+            ax3 = fig.add_subplot(n_rows, n_cols, i * n_cols + 3)
+            ax3.set_title("Output")
+            ax3.pcolormesh(output_data[i, 0, :, :].cpu().detach().numpy(), vmin=-1, vmax=1)
+        plt.tight_layout()
+        plt.savefig(Path(config.path_model_output, f"training_visualization_{count}.png"))
+        plt.close(fig)
+
+
 def test_climex_walking_skeleton():
     # ToDo: this is a workaround to not expose local paths in the code base.
     config = config_from_yaml(climex_for_prob_unet.ProbUnetClimexConfig,
@@ -184,16 +205,21 @@ def test_climex_walking_skeleton():
                                        num_neighbors=2,
                                        active_split_name="train",
                                        debug_max_sample=None)
-    data_loader = td.DataLoader(skeleton_dataset, batch_size=8, shuffle=True)
+    if config.device == "cuda":
+        data_loader = td.DataLoader(skeleton_dataset, batch_size=16, shuffle=False, pin_memory=True)
+    else:
+        data_loader = td.DataLoader(skeleton_dataset, batch_size=8, shuffle=False)
 
     # Step 3: Train a probabilistic UNet on this data and validate that it can learn something meaningful.
     # ToDo: consider moving the latent space before the resolution increase layers.
     prob_unet = ProbabilisticUnet(
         in_channels=1, out_channels=1, num_latent_dimensions=2, depth=2,
         initial_nb_of_hidden_channels=8, kernel_size=3, resolution_increase_layers=2)
+    prob_unet.to(config.device)
     # ToDo: this needs to have its own path
     path_prob_unet_model = Path(config.path_model_output, "prob_unet_model.pth")
     criterion = nn.MSELoss()
+    ssim_loss = MultiScaleStructuralSimilarityIndexMeasure(data_range=(-1.0, 1.0), kernel_size=7).to(config.device)
     if not path_prob_unet_model.is_file():
         optimizer = optim.Adam(prob_unet.parameters(), lr=0.01)
         prob_unet.train()
@@ -203,9 +229,14 @@ def test_climex_walking_skeleton():
         for epoch in range(64):  # ToDo: more epochs
             for item in data_loader:
                 optimizer.zero_grad()
-                output = prob_unet(item["input_first_block"].unsqueeze(1),
-                                   target_data=item["target"].unsqueeze(1), mode="train")  # Add channel dimension
-                reconstruction_loss = criterion(output.squeeze(1), item["target"])
+                input_data = item["input_first_block"].unsqueeze(1).to(config.device)  # Add channel dimension
+                target_data = item["target"].unsqueeze(1).to(config.device)  # Add channel dimension
+                output = prob_unet(input_data, target_data=target_data, mode="train")  # Add channel dimension
+                output_training_figures(config=config, count=len(losses),
+                                        input_data=input_data,
+                                        target_data=target_data, output_data=output)
+                # reconstruction_loss = criterion(output.squeeze(1), target_data)
+                reconstruction_loss = 1 - ssim_loss(output, target_data)
                 kl_loss = prob_unet.kl_divergence()
                 loss = reconstruction_loss + kl_loss
                 loss.backward()

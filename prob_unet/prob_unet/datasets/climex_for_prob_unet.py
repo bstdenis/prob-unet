@@ -26,6 +26,7 @@ class ProbUnetClimexConfig:
     overwrite_existing_coarse_files: bool = False
     output_original_grid_coarse_files: bool = False
     latent_space_discretization: list = field(default_factory=list)
+    device: str = "cpu"
 
 
 def prob_unet_climex_parse_config(config: ProbUnetClimexConfig | Path | str) -> ProbUnetClimexConfig:
