@@ -21,20 +21,28 @@ from prob_unet.ml.probabilistic_unet import ProbabilisticUnet
 
 
 class SkeletonDataset(td.Dataset):
-    def __init__(self, path_daily_data, path_daily_coarse_data, path_neighbors, active_split_name="train"):
+    def __init__(self, path_daily_data, path_daily_coarse_data, path_neighbors, train_years, validation_years,
+                 test_years, num_neighbors=0, active_split_name="train", debug_max_sample=None):
         self.path_daily_data = path_daily_data
         self.path_daily_coarse_data = path_daily_coarse_data
         self.path_neighbors = path_neighbors
-        self.num_neighbors = 2
+        self.num_neighbors = num_neighbors
         self.active_split_name = active_split_name
-        if self.active_split_name == "train":
-            self.starting_idx = 0
-        elif self.active_split_name == "val":
-            self.starting_idx = 12
-        elif self.active_split_name == "test":
-            self.starting_idx = 20
-        else:
-            raise ValueError(f"Unsupported split name: {self.active_split_name}")
+        nc_files = sorted(list(Path(path_daily_data).glob("*.nc")))
+        self.train_files = [f for f in nc_files if int(f.stem.split("_")[-1]) in train_years]
+        self.val_files = [f for f in nc_files if int(f.stem.split("_")[-1]) in validation_years]
+        self.test_files = [f for f in nc_files if int(f.stem.split("_")[-1]) in test_years]
+        self.num_train_samples = len(self.train_files) * 365 * (num_neighbors + 1)
+        self.num_val_samples = len(self.val_files) * 365 * (num_neighbors + 1)
+        self.num_test_samples = len(self.test_files) * 365
+        # if self.active_split_name == "train":
+        #     self.starting_idx = 0
+        # elif self.active_split_name == "val":
+        #     self.starting_idx = 12
+        # elif self.active_split_name == "test":
+        #     self.starting_idx = 20
+        # else:
+        #     raise ValueError(f"Unsupported split name: {self.active_split_name}")
         ds = xarray.open_dataset(Path(self.path_daily_data, "kda_daily_pr_1961.nc"), engine="h5netcdf",
                                  decode_times=False)
         self.save_data = {"rlat": ds["rlat"].values, "rlon": ds["rlon"].values, "lat": ds["lat"].values,
@@ -45,40 +53,86 @@ class SkeletonDataset(td.Dataset):
                           "lon_attrs": ds["lon"].attrs, "height_attrs": ds["height"].attrs,
                           "time_attrs": ds["time"].attrs, "pr_attrs": ds["pr"].attrs}
         ds.close()
-        with open(str(self.path_neighbors), "rb") as f:
-            self.neighbors = pickle.load(f)
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_djf", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_djf = pickle.load(f)
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_jja", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_jja = pickle.load(f)
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_mam", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_mam = pickle.load(f)
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_son", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_son = pickle.load(f)
+        self.debug_max_sample = debug_max_sample
 
     def __len__(self):
         if self.active_split_name == "train":
-            return 12 * (self.num_neighbors + 1)
+            if self.debug_max_sample is not None:
+                return min(self.num_train_samples, self.debug_max_sample)
+            return self.num_train_samples
         elif self.active_split_name == "val":
-            return 8 * (self.num_neighbors + 1)
+            if self.debug_max_sample is not None:
+                return min(self.num_val_samples, self.debug_max_sample)
+            return self.num_val_samples
         elif self.active_split_name == "test":
-            return 8 * (self.num_neighbors + 1)
+            if self.debug_max_sample is not None:
+                return min(self.num_test_samples, self.debug_max_sample)
+            return self.num_test_samples
+        else:
+            raise ValueError(f"Unsupported split name: {self.active_split_name}")
+    
+    def get_neighbors_list_for_date(self, member, year, month, day):
+        if month in [12, 1, 2]:
+            return self.neighbors_djf.get((member, year, month, day), [])
+        elif month in [3, 4, 5]:
+            return self.neighbors_mam.get((member, year, month, day), [])
+        elif month in [6, 7, 8]:
+            return self.neighbors_jja.get((member, year, month, day), [])
+        elif month in [9, 10, 11]:
+            return self.neighbors_son.get((member, year, month, day), [])
+        else:
+            raise ValueError(f"Invalid month: {month}")
+    
+    def get_active_file(self, file_idx):
+        if self.active_split_name == "train":
+            return self.train_files[file_idx]
+        elif self.active_split_name == "val":
+            return self.val_files[file_idx]
+        elif self.active_split_name == "test":
+            return self.test_files[file_idx]
         else:
             raise ValueError(f"Unsupported split name: {self.active_split_name}")
 
-
     def __getitem__(self, idx):
-        neighbor_idx = idx % (self.num_neighbors + 1)
-        file_count = idx // (self.num_neighbors + 1)
-        netcdf_idx = self.starting_idx + file_count
+        if idx >= len(self):
+            raise IndexError(f"Index {idx} out of range for dataset with length {len(self)}")
+        if self.active_split_name == "test":
+            neighbor_idx = 0
+            daily_count = idx
+        else:
+            neighbor_idx = idx % (self.num_neighbors + 1)
+            daily_count = idx // (self.num_neighbors + 1)
+        netcdf_idx = daily_count % 365
+        file_count = daily_count // 365
 
-        ds_input = xarray.open_dataset(
-            Path(self.path_daily_coarse_data, "kda_daily_pr_1961_coarse.nc"),
-            engine="h5netcdf", decode_times=False)
+        active_file = self.get_active_file(file_count)
+        member = active_file.stem.split("_")[0]
+        coarse_file_name = f"{member}_daily_coarse_pr_{active_file.stem.split('_')[-1]}.nc"
+        ds_input = xarray.open_dataset(Path(self.path_daily_coarse_data, coarse_file_name), engine="h5netcdf",
+                                       decode_times=False)
         input_data = normalize(ds_input["pr"].values[netcdf_idx, :, :], valid_min=0.0, valid_max=0.001,
                                log_normalize=True, log_offset=1e-12)
         cf_datetime = cftime.num2date(ds_input["time"].values[netcdf_idx], ds_input["time"].attrs["units"],
                                       calendar=ds_input["time"].attrs.get("calendar", "standard"))
 
         if neighbor_idx == 0:
-            ds_output = xarray.open_dataset(
-                Path(self.path_daily_data, "kda_daily_pr_1961.nc"),
-                engine="h5netcdf", decode_times=False)
+            ds_output = xarray.open_dataset(active_file, engine="h5netcdf", decode_times=False)
             target_data = ds_output["pr"].values[netcdf_idx, :, :]
         else:
-            neighbors_list = self.neighbors[("kda", cf_datetime.year, cf_datetime.month, cf_datetime.day)]
+            neighbors_list = self.get_neighbors_list_for_date(
+                member, cf_datetime.year, cf_datetime.month, cf_datetime.day)
             neighbor = neighbors_list[neighbor_idx - 1]
             ds_output = xarray.open_dataset(
                 Path(self.path_daily_data, f"{neighbor[0]}_daily_pr_{neighbor[1]}.nc"),
@@ -114,15 +168,9 @@ def test_climex_walking_skeleton():
             climex_for_prob_unet.climex_hourly_to_daily_single_year_to_disk(config, member, year)
     
     # Step 1.1: Create smoothed version of daily precip
-    # ToDo: write into a single function call
     for member in config.members:
         for year in range(config.starting_training_year, config.ending_training_year + 1):
-            path_coarse_input = Path(config.path_daily_coarse_output,
-                                     f"{member}_daily_{config.variable_name}_{year}_coarse.nc")
-            if not path_coarse_input.is_file():
-                ds_coarse = climex_for_prob_unet.climex_upscale(config.path_daily_output, member, year)
-                ds_coarse.to_netcdf(path_coarse_input, engine="h5netcdf",
-                                    encoding={"pr": {"chunksizes": (365, 32, 32)}})
+            climex_for_prob_unet.climex_upscale_single_year_to_disk(config, member, year)
     
     # Step 2: Need a dataloader that can read this file and feed it into a UNet for training.
     # ToDo: there may need to be some smarter shuffling
@@ -130,15 +178,21 @@ def test_climex_walking_skeleton():
     skeleton_dataset = SkeletonDataset(path_daily_data=config.path_daily_output,
                                        path_daily_coarse_data=config.path_daily_coarse_output,
                                        path_neighbors=config.path_neighbors,
-                                       active_split_name="train")
-    data_loader = td.DataLoader(skeleton_dataset, batch_size=4, shuffle=True)
+                                       train_years=[1961],
+                                       validation_years=[],
+                                       test_years=[],
+                                       num_neighbors=2,
+                                       active_split_name="train",
+                                       debug_max_sample=None)
+    data_loader = td.DataLoader(skeleton_dataset, batch_size=8, shuffle=True)
 
     # Step 3: Train a probabilistic UNet on this data and validate that it can learn something meaningful.
     # ToDo: consider moving the latent space before the resolution increase layers.
     prob_unet = ProbabilisticUnet(
         in_channels=1, out_channels=1, num_latent_dimensions=2, depth=2,
         initial_nb_of_hidden_channels=8, kernel_size=3, resolution_increase_layers=2)
-    path_prob_unet_model = Path(config.path_output, "prob_unet_model.pth")
+    # ToDo: this needs to have its own path
+    path_prob_unet_model = Path(config.path_model_output, "prob_unet_model.pth")
     criterion = nn.MSELoss()
     if not path_prob_unet_model.is_file():
         optimizer = optim.Adam(prob_unet.parameters(), lr=0.01)
@@ -146,7 +200,7 @@ def test_climex_walking_skeleton():
         losses = []
         kl_losses = []
         reconstruction_losses = []
-        for epoch in range(80):  # ToDo: more epochs
+        for epoch in range(64):  # ToDo: more epochs
             for item in data_loader:
                 optimizer.zero_grad()
                 output = prob_unet(item["input_first_block"].unsqueeze(1),
@@ -170,7 +224,11 @@ def test_climex_walking_skeleton():
     data_loader_test = td.DataLoader(
         SkeletonDataset(path_daily_data=config.path_daily_output,
                         path_daily_coarse_data=config.path_daily_coarse_output,
-                        path_neighbors=config.path_neighbors, active_split_name="train"),
+                        path_neighbors=config.path_neighbors,
+                        train_years=[],
+                        validation_years=[],
+                        test_years=[1962],
+                        active_split_name="test"),
         batch_size=4, shuffle=False)
     for item in data_loader_test:
         for n, latent_space_coords in enumerate(itertools.product(*config.latent_space_discretization)):
@@ -179,41 +237,42 @@ def test_climex_walking_skeleton():
             # Dummy latent space variation
             # result += n / 20.0
             result = prob_unet(item["input_first_block"].unsqueeze(1), mode="inference",
-                                 latent_coord=torch.Tensor(latent_space_coords))  # Add channel dimension
+                               latent_coord=torch.Tensor(latent_space_coords))  # Add channel dimension
             z = criterion(result.squeeze(1), item["target"]).item()
             for i in range(result.shape[0]):
                 result_data = inverse_normalize(result[i].cpu().detach().numpy(), known_min=0.0, known_max=0.001,
                                                 log_normalize=True, log_offset=1e-12) 
+                # ToDo: this has to have its own path
                 climex_for_prob_unet.save_result_from_dataset_item(
-                    config.path_output, data_loader_test.dataset, {x: item[x][i] for x in item}, result_data,
+                    config.path_inference_output, data_loader_test.dataset, {x: item[x][i] for x in item}, result_data,
                     latent_space_idx=n, latent_space_coords=latent_space_coords)
         break  # ToDo: remove
 
     # Step 5: Compute some metrics
 
     # Step 6: visualize some results
-    ds = xarray.open_dataset(Path(config.path_output, "inference_1961_01_01_1.nc"), engine="h5netcdf")
+    ds = xarray.open_dataset(Path(config.path_inference_output, "inference_1962_01_01_1.nc"), engine="h5netcdf")
     fig1 = plt.figure(figsize=(12, 12))
     ax1 = fig1.add_subplot(1, 1, 1)
     nd_ax_plot(ax1, fig1, ds["pr"].values[0, :, :], "", vmin=0, vmax=0.00012, reverse_i=True)
-    fig1.savefig(Path(config.path_output, "test_visualization.png"))
+    fig1.savefig(Path(config.path_inference_output, "test_visualization.png"))
     plt.close(fig1)
 
-    ds = xarray.open_dataset(Path(config.path_output, "target_1961_01_21_None.nc"), engine="h5netcdf")
-    fig1 = plt.figure(figsize=(12, 12))
-    ax1 = fig1.add_subplot(1, 1, 1)
-    nd_ax_plot(ax1, fig1, ds["pr"].values[0, :, :], "", vmin=0, vmax=0.00012, reverse_i=True)
-    fig1.savefig(Path(config.path_output, "test_visualization_target.png"))
-    plt.close(fig1)
+    # ds = xarray.open_dataset(Path(config.path_inference_output, "target_1962_01_21_None.nc"), engine="h5netcdf")
+    # fig1 = plt.figure(figsize=(12, 12))
+    # ax1 = fig1.add_subplot(1, 1, 1)
+    # nd_ax_plot(ax1, fig1, ds["pr"].values[0, :, :], "", vmin=0, vmax=0.00012, reverse_i=True)
+    # fig1.savefig(Path(config.path_inference_output, "test_visualization_target.png"))
+    # plt.close(fig1)
 
     fig_final = plt.figure(figsize=(20, 10))
     ax1 = fig_final.add_subplot(3, 4, 1)
-    ds1 = xarray.open_dataset(Path(config.path_output, "kda_daily_pr_1961_coarse.nc"), engine="h5netcdf",
+    ds1 = xarray.open_dataset(Path(config.path_daily_coarse_output, "kda_daily_coarse_pr_1962.nc"), engine="h5netcdf",
                                 decode_times=False)
     ax1.pcolormesh(ds1["pr"].values[0, :, :], vmin=0, vmax=0.00012)
     ax1.set_title("Input")
     ax2 = fig_final.add_subplot(3, 4, 5)
-    ds2 = xarray.open_dataset(Path(config.path_output, "kda_daily_pr_1961.nc"), engine="h5netcdf",
+    ds2 = xarray.open_dataset(Path(config.path_daily_output, "kda_daily_pr_1962.nc"), engine="h5netcdf",
                               decode_times=False)
     ax2.pcolormesh(ds2["pr"].values[0, :, :], vmin=0, vmax=0.00012)
     ax2.set_title("Target")
@@ -222,12 +281,12 @@ def test_climex_walking_skeleton():
         i = idx_2d[0]
         j = idx_2d[1] + 1
         ax = fig_final.add_subplot(3, 4, i * 4 + j + 1)
-        ds_n = xarray.open_dataset(Path(config.path_output, f"inference_1961_01_01_{n}.nc"), engine="h5netcdf",
+        ds_n = xarray.open_dataset(Path(config.path_inference_output, f"inference_1962_01_01_{n}.nc"), engine="h5netcdf",
                                    decode_times=False)
         data_n = ds_n["pr"].values[0, :, :]
         # data = np.random.rand(128, 128) * 0.00003 * (latent_space_coords[0] + 1) * (latent_space_coords[1] + 1)  # Dummy data with some variation
         ax.pcolormesh(data_n, vmin=0, vmax=0.00012)
         ax.set_title(f"Sample {i * 4 + j}")
-    fig_final.savefig(Path(config.path_output, "test_visualization_final.png"))
+    fig_final.savefig(Path(config.path_inference_output, "test_visualization_final.png"))
     plt.close(fig_final)
-    assert Path(config.path_output, "test_visualization_final.png").is_file()
+    assert Path(config.path_inference_output, "test_visualization_final.png").is_file()

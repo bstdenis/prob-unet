@@ -14,6 +14,8 @@ from resoterre.data_management.netcdf_utils import CFVariables, netcdf_defaults
 class ProbUnetClimexConfig:
     path_daily_output: Path
     path_daily_coarse_output: Path
+    path_model_output: Path
+    path_inference_output: Path
     path_climex: Path
     path_neighbors: Path
     variable_name: str
@@ -21,6 +23,8 @@ class ProbUnetClimexConfig:
     ending_training_year: int
     members: list = field(default_factory=list)
     overwrite_existing_daily_files: bool = False
+    overwrite_existing_coarse_files: bool = False
+    output_original_grid_coarse_files: bool = False
     latent_space_discretization: list = field(default_factory=list)
 
 
@@ -118,19 +122,27 @@ def climex_hourly_to_daily_single_year(path_climex, member, year):
     return ds
 
 
-def climex_upscale(path_data, member, year):
-    ds = xarray.open_dataset(Path(path_data, f"{member}_daily_pr_{year:04d}.nc"), decode_times=False)
+def climex_upscale(path_data, member, year, original_grid=False):
+    ds = xarray.open_dataset(Path(path_data, f"{member}_daily_pr_{year:04d}.nc"), decode_times=False,
+                             engine="h5netcdf")
     # ToDo: spatial index should be arguments
     pr_reshaped = ds["pr"].values.reshape(ds["pr"].shape[0], 32, 4, 32, 4)
     pr_coarse = pr_reshaped.mean(axis=(2, 4))
-    rlat_reshaped = ds["rlat"].values.reshape(128 // 4, 4)
-    rlat_coarse = rlat_reshaped.mean(axis=1)
-    rlon_reshaped = ds["rlon"].values.reshape(128 // 4, 4)
-    rlon_coarse = rlon_reshaped.mean(axis=1)
-    lat_reshaped = ds["lat"].values.reshape(128 // 4, 4, 128 // 4, 4)
-    lat_coarse = lat_reshaped.mean(axis=(1, 3))
-    lon_reshaped = ds["lon"].values.reshape(128 // 4, 4, 128 // 4, 4)
-    lon_coarse = lon_reshaped.mean(axis=(1, 3))
+    if original_grid:
+        pr_coarse = np.repeat(np.repeat(pr_coarse, 4, axis=1), 4, axis=2)
+        rlat_coarse = ds["rlat"].values
+        rlon_coarse = ds["rlon"].values
+        lat_coarse = ds["lat"].values
+        lon_coarse = ds["lon"].values
+    else:
+        rlat_reshaped = ds["rlat"].values.reshape(128 // 4, 4)
+        rlat_coarse = rlat_reshaped.mean(axis=1)
+        rlon_reshaped = ds["rlon"].values.reshape(128 // 4, 4)
+        rlon_coarse = rlon_reshaped.mean(axis=1)
+        lat_reshaped = ds["lat"].values.reshape(128 // 4, 4, 128 // 4, 4)
+        lat_coarse = lat_reshaped.mean(axis=(1, 3))
+        lon_reshaped = ds["lon"].values.reshape(128 // 4, 4, 128 // 4, 4)
+        lon_coarse = lon_reshaped.mean(axis=(1, 3))
 
     cf_attrs = {
         "Conventions": "CF-1.13",
@@ -294,3 +306,22 @@ def climex_hourly_to_daily_single_year_to_disk(config, member, year):
     # ax1.set_ylabel("Latitude at left")
     # fig1.savefig(Path(config.path_output, f"test_daily_pr_{member}_{year}.png"))
     # plt.close(fig1)
+
+
+def climex_upscale_single_year_to_disk(config, member, year):
+    config = prob_unet_climex_parse_config(config)
+    if config.variable_name != "pr":
+        raise NotImplementedError("This function is currently only verified for 'pr' variable.")
+    path_sample_input = Path(config.path_daily_coarse_output,
+                             f"{member}_daily_coarse_{config.variable_name}_{year}.nc")
+    if not path_sample_input.is_file() or config.overwrite_existing_coarse_files:
+        ds_coarse = climex_upscale(config.path_daily_output, member, year)
+        path_sample_input.parent.mkdir(parents=True, exist_ok=True)
+        ds_coarse.to_netcdf(path_sample_input, engine="h5netcdf", encoding={"pr": {"chunksizes": (365, 32, 32)}})
+    if config.output_original_grid_coarse_files:
+        path_sample_input = Path(config.path_daily_coarse_output,
+                                 f"{member}_daily_coarse_original_grid_{config.variable_name}_{year}.nc")
+        if not path_sample_input.is_file() or config.overwrite_existing_coarse_files:
+            ds_coarse = climex_upscale(config.path_daily_output, member, year, original_grid=True)
+            path_sample_input.parent.mkdir(parents=True, exist_ok=True)
+            ds_coarse.to_netcdf(path_sample_input, engine="h5netcdf", encoding={"pr": {"chunksizes": (128, 128, 128)}})
