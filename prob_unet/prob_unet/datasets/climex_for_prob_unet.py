@@ -1,3 +1,4 @@
+import pickle
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -5,13 +6,16 @@ from pathlib import Path
 import cftime
 import numpy as np
 import xarray
+from torch.utils import data as td
 
 from resoterre.config_utils import config_from_yaml
 from resoterre.data_management.netcdf_utils import CFVariables, netcdf_defaults
+from resoterre.ml.data_loader_utils import normalize, inverse_normalize
 
 
 @dataclass(frozen=True, slots=True)
 class ProbUnetClimexConfig:
+    experiment_name: str
     path_daily_output: Path
     path_daily_coarse_output: Path
     path_model_output: Path
@@ -25,8 +29,21 @@ class ProbUnetClimexConfig:
     overwrite_existing_daily_files: bool = False
     overwrite_existing_coarse_files: bool = False
     output_original_grid_coarse_files: bool = False
+    num_latent_dimensions: int = 2
+    unet_depth: int = 2
+    initial_nb_of_hidden_channels: int = 8
+    unet_kernel_size: int = 3
+    learning_rate: float = 0.01
+    mse_weight: float = 1.0
+    ssim_weight: float = 0.0
+    kl_weight: float = 1.0
     latent_space_discretization: list = field(default_factory=list)
+    training_batch_size: int = 32
     device: str = "cpu"
+    num_epochs: int = 10
+    restart_training: bool = False
+    inference_batch_size: int = 32
+    inference_device: str = "cpu"
 
 
 def prob_unet_climex_parse_config(config: ProbUnetClimexConfig | Path | str) -> ProbUnetClimexConfig:
@@ -326,3 +343,132 @@ def climex_upscale_single_year_to_disk(config, member, year):
             ds_coarse = climex_upscale(config.path_daily_output, member, year, original_grid=True)
             path_sample_input.parent.mkdir(parents=True, exist_ok=True)
             ds_coarse.to_netcdf(path_sample_input, engine="h5netcdf", encoding={"pr": {"chunksizes": (128, 128, 128)}})
+
+
+class ClimexDataset(td.Dataset):
+    def __init__(self, path_daily_data, path_daily_coarse_data, path_neighbors, train_years, validation_years,
+                 test_years, num_neighbors=0, active_split_name="train", debug_max_sample=None):
+        self.path_daily_data = path_daily_data
+        self.path_daily_coarse_data = path_daily_coarse_data
+        self.path_neighbors = path_neighbors
+        self.num_neighbors = num_neighbors
+        self.active_split_name = active_split_name
+        nc_files = sorted(list(Path(path_daily_data).glob("*.nc")))
+        self.train_files = [f for f in nc_files if int(f.stem.split("_")[-1]) in train_years]
+        self.val_files = [f for f in nc_files if int(f.stem.split("_")[-1]) in validation_years]
+        self.test_files = [f for f in nc_files if int(f.stem.split("_")[-1]) in test_years]
+        self.num_train_samples = len(self.train_files) * 365 * (num_neighbors + 1)
+        self.num_val_samples = len(self.val_files) * 365 * (num_neighbors + 1)
+        self.num_test_samples = len(self.test_files) * 365
+        ds = xarray.open_dataset(Path(self.path_daily_data, "kda_daily_pr_1961.nc"), engine="h5netcdf",
+                                 decode_times=False)
+        self.save_data = {"rlat": ds["rlat"].values, "rlon": ds["rlon"].values, "lat": ds["lat"].values,
+                          "lon": ds["lon"].values, "height": ds["height"].values,
+                          "rotated_pole_attrs": ds["rotated_pole"].attrs,
+                          "gattrs": ds.attrs,
+                          "rlat_attrs": ds["rlat"].attrs, "rlon_attrs": ds["rlon"].attrs, "lat_attrs": ds["lat"].attrs,
+                          "lon_attrs": ds["lon"].attrs, "height_attrs": ds["height"].attrs,
+                          "time_attrs": ds["time"].attrs, "pr_attrs": ds["pr"].attrs}
+        ds.close()
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_djf", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_djf = pickle.load(f)
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_jja", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_jja = pickle.load(f)
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_mam", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_mam = pickle.load(f)
+        with open(Path(self.path_neighbors, 
+                       "climex_pattern_search_5sims_son", "results", "climex_neighbors.pkl"), "rb") as f:
+            self.neighbors_son = pickle.load(f)
+        self.debug_max_sample = debug_max_sample
+
+    def __len__(self):
+        if self.active_split_name == "train":
+            if self.debug_max_sample is not None:
+                return min(self.num_train_samples, self.debug_max_sample)
+            return self.num_train_samples
+        elif self.active_split_name == "val":
+            if self.debug_max_sample is not None:
+                return min(self.num_val_samples, self.debug_max_sample)
+            return self.num_val_samples
+        elif self.active_split_name == "test":
+            if self.debug_max_sample is not None:
+                return min(self.num_test_samples, self.debug_max_sample)
+            return self.num_test_samples
+        else:
+            raise ValueError(f"Unsupported split name: {self.active_split_name}")
+    
+    def get_neighbors_list_for_date(self, member, year, month, day):
+        if month in [12, 1, 2]:
+            return self.neighbors_djf.get((member, year, month, day), [])
+        elif month in [3, 4, 5]:
+            return self.neighbors_mam.get((member, year, month, day), [])
+        elif month in [6, 7, 8]:
+            return self.neighbors_jja.get((member, year, month, day), [])
+        elif month in [9, 10, 11]:
+            return self.neighbors_son.get((member, year, month, day), [])
+        else:
+            raise ValueError(f"Invalid month: {month}")
+    
+    def get_active_file(self, file_idx):
+        if self.active_split_name == "train":
+            return self.train_files[file_idx]
+        elif self.active_split_name == "val":
+            return self.val_files[file_idx]
+        elif self.active_split_name == "test":
+            return self.test_files[file_idx]
+        else:
+            raise ValueError(f"Unsupported split name: {self.active_split_name}")
+
+    def __getitem__(self, idx):
+        if idx >= len(self):
+            raise IndexError(f"Index {idx} out of range for dataset with length {len(self)}")
+        if self.active_split_name == "test":
+            neighbor_idx = 0
+            daily_count = idx
+        else:
+            neighbor_idx = idx % (self.num_neighbors + 1)
+            daily_count = idx // (self.num_neighbors + 1)
+        netcdf_idx = daily_count % 365
+        file_count = daily_count // 365
+
+        active_file = self.get_active_file(file_count)
+        member = active_file.stem.split("_")[0]
+        coarse_file_name = f"{member}_daily_coarse_pr_{active_file.stem.split('_')[-1]}.nc"
+        ds_input = xarray.open_dataset(Path(self.path_daily_coarse_data, coarse_file_name), engine="h5netcdf",
+                                       decode_times=False)
+        input_data = normalize(ds_input["pr"].values[netcdf_idx, :, :], valid_min=0.0, valid_max=0.001,
+                               log_normalize=True, log_offset=1e-12)
+        cf_datetime = cftime.num2date(ds_input["time"].values[netcdf_idx], ds_input["time"].attrs["units"],
+                                      calendar=ds_input["time"].attrs.get("calendar", "standard"))
+
+        if neighbor_idx == 0:
+            ds_output = xarray.open_dataset(active_file, engine="h5netcdf", decode_times=False)
+            target_data = ds_output["pr"].values[netcdf_idx, :, :]
+        else:
+            neighbors_list = self.get_neighbors_list_for_date(
+                member, cf_datetime.year, cf_datetime.month, cf_datetime.day)
+            neighbor = neighbors_list[neighbor_idx - 1]
+            ds_output = xarray.open_dataset(
+                Path(self.path_daily_data, f"{neighbor[0]}_daily_pr_{neighbor[1]}.nc"),
+                engine="h5netcdf", decode_times=False)
+            cf_datetime_output = cftime.num2date(
+                ds_output["time"].values[:], ds_output["time"].attrs["units"],
+                calendar=ds_output["time"].attrs.get("calendar", "standard"))
+            target_date = cftime.datetime(neighbor[1], neighbor[2], neighbor[3], 0, 30,
+                                          calendar=ds_output["time"].attrs.get("calendar", "standard"))
+            date_idx = next(i for i, d in enumerate(cf_datetime_output) if d == target_date)
+            target_data = ds_output["pr"].values[date_idx, :, :]
+
+        target_data = normalize(target_data, valid_min=0.0, valid_max=0.001,
+                                log_normalize=True, log_offset=1e-12)
+        idx_data = {"input_first_block": input_data,
+                    "target": target_data,
+                    "year": cf_datetime.year,
+                    "month": cf_datetime.month,
+                    "day": cf_datetime.day}
+        ds_output.close()
+        ds_input.close()
+        return idx_data
