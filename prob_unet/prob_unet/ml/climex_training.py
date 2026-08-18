@@ -34,7 +34,8 @@ def climex_get_data_loader(config, split_name="train", batch_size=None):
 def climex_training(config):
     prob_unet = ProbabilisticUnet(
         in_channels=1, out_channels=1, num_latent_dimensions=config.num_latent_dimensions,
-        depth=config.unet_depth, initial_nb_of_hidden_channels=config.initial_nb_of_hidden_channels,
+        depth=config.unet_depth, depth_of_latent_injection=config.depth_of_latent_injection,
+        initial_nb_of_hidden_channels=config.initial_nb_of_hidden_channels,
         kernel_size=config.unet_kernel_size, resolution_increase_layers=2)
     prob_unet.to(config.device)
     if not config.restart_training:

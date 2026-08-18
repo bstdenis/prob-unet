@@ -57,7 +57,8 @@ class ProbabilisticUnet(nn.Module):
         self, 
         in_channels: int, 
         out_channels: int, 
-        num_latent_dimensions: int, 
+        num_latent_dimensions: int,
+        depth_of_latent_injection: int,
         depth: int, 
         initial_nb_of_hidden_channels: int, 
         kernel_size: int, 
@@ -65,6 +66,7 @@ class ProbabilisticUnet(nn.Module):
     ):
         super().__init__()
         self.num_latent_dimensions = num_latent_dimensions
+        self.depth_of_latent_injection = depth_of_latent_injection
         
         # Track distribution parameters for the KL Divergence loss component
         self.posterior_mu = None
@@ -106,9 +108,13 @@ class ProbabilisticUnet(nn.Module):
         for i in range(depth):
             skip_c = self.down_channels[-(i+1)]
             out_c = skip_c
+            if depth + resolution_increase_layers - i - 1 == self.depth_of_latent_injection:
+                latent_c = num_latent_dimensions
+            else:
+                latent_c = 0
             self.unet_up.append(nn.ModuleList([
                 nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-                DoubleConv(c_in + skip_c, out_c, kernel_size)
+                DoubleConv(c_in + skip_c + latent_c, out_c, kernel_size)
             ]))
             c_in = out_c
 
@@ -116,7 +122,9 @@ class ProbabilisticUnet(nn.Module):
         # 3. Super-Resolution Layers (Post U-Net)
         # ========================================================
         self.res_increase = nn.ModuleList()
-        for _ in range(resolution_increase_layers):
+        for i in range(resolution_increase_layers):
+            if resolution_increase_layers - i - 1 == self.depth_of_latent_injection:
+                c_in += num_latent_dimensions  # Account for latent vector concatenation at this layer
             self.res_increase.append(nn.ModuleList([
                 nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
                 DoubleConv(c_in, c_in, kernel_size)
@@ -125,11 +133,18 @@ class ProbabilisticUnet(nn.Module):
         # ========================================================
         # 4. Final Combination block (U-Net Features + Latent Vector Z)
         # ========================================================
-        self.fcomb = nn.Sequential(
-            nn.Conv2d(c_in + num_latent_dimensions, c_in, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(c_in, out_channels, kernel_size=1)
-        )
+        if self.depth_of_latent_injection == 0:
+            self.fcomb = nn.Sequential(
+                nn.Conv2d(c_in + num_latent_dimensions, c_in, kernel_size=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c_in, out_channels, kernel_size=1)
+            )
+        else:
+            self.fcomb = nn.Sequential(
+                nn.Conv2d(c_in, c_in, kernel_size=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c_in, out_channels, kernel_size=1)
+            )
 
     def _get_prior_params(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         params = self.prior(x)
@@ -187,23 +202,7 @@ class ProbabilisticUnet(nn.Module):
             
         # Bottom
         x = self.bottom(x)
-        
-        # Up
-        for i, up_layer in enumerate(self.unet_up):
-            upsample, conv = up_layer
-            x = upsample(x)
-            skip = skip_connections[-(i+1)]
-            x = torch.cat([x, skip], dim=1)
-            x = conv(x)
-            
-        # Resolution increase
-        for res_layer in self.res_increase:
-            upsample, conv = res_layer
-            x = upsample(x)
-            x = conv(x)
-            
-        unet_features = x
-        
+
         # -----------------------------------------------
         # 2. Latent Distribution Sampling
         # -----------------------------------------------
@@ -229,6 +228,23 @@ class ProbabilisticUnet(nn.Module):
                 z = self._reparameterize(prior_mu, prior_logvar)
         else:
             raise ValueError(f"Unknown mode: {mode}")
+
+        # ToDo: allow introduction of latent space at different depths
+        # Up
+        for i, up_layer in enumerate(self.unet_up):
+            upsample, conv = up_layer
+            x = upsample(x)
+            skip = skip_connections[-(i+1)]
+            x = torch.cat([x, skip], dim=1)
+            x = conv(x)
+
+        # Resolution increase
+        for res_layer in self.res_increase:
+            upsample, conv = res_layer
+            x = upsample(x)
+            x = conv(x)
+
+        unet_features = x
 
         # -----------------------------------------------
         # 3. Combining features with latent vector

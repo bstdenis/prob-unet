@@ -31,6 +31,7 @@ class ProbUnetClimexConfig:
     output_original_grid_coarse_files: bool = False
     num_latent_dimensions: int = 2
     unet_depth: int = 2
+    depth_of_latent_injection: int = 0  # 0 means in the last layer, 1 means one layer before last, etc.
     initial_nb_of_hidden_channels: int = 8
     unet_kernel_size: int = 3
     learning_rate: float = 0.01
